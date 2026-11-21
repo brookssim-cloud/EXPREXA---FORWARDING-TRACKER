@@ -553,6 +553,14 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
+  // App Check proves each request comes from this page, not from a script
+  // somewhere else using the project's public settings. Same CDN and version
+  // as the two scripts above.
+  if(window.firebase && firebase.SDK_VERSION){
+    document.write('<script src="https://www.gstatic.com/' + 'firebasejs/' + firebase.SDK_VERSION + '/firebase-app-check-compat.js"><\/script>');
+  }
+</script>
+<script>
 (function(){
   'use strict';
 
@@ -575,10 +583,38 @@
     messagingSenderId: "733118809749",
     appId: "1:733118809749:web:0cf0f81f37874043f4fd9c"
   };
+  // Fraud Defense (reCAPTCHA Enterprise) key for App Check — public by
+  // design. Until App Check is enforced in the Firebase console this only
+  // reports; a failure here must never stop the app from loading.
+  //
+  // Safety catch: if reCAPTCHA cannot load at all (an ad blocker, a network
+  // that blocks google.com/recaptcha, an old browser), the Firebase SDK
+  // waits for it forever and the app never reaches the database. So if no
+  // App Check answer arrives within 8 seconds, reload once without it for
+  // the rest of this browser session.
+  const APP_CHECK_SITE_KEY = '6LeyLCsuAAAAABhbAbAx7Iq4f5GRCh17ly8-HWet';
+  function startAppCheck(app){
+    let skip = false;
+    try{ skip = sessionStorage.getItem('fwd_skip_appcheck') === '1'; }catch(e){}
+    if(skip){ console.warn('App Check skipped this session: reCAPTCHA did not load.'); return; }
+    if(!firebase.appCheck || !APP_CHECK_SITE_KEY || APP_CHECK_SITE_KEY.indexOf('__') === 0) return;
+    try{
+      const ac = firebase.appCheck(app);
+      ac.activate(new firebase.appCheck.ReCaptchaEnterpriseProvider(APP_CHECK_SITE_KEY), true);
+      let settled = false;
+      ac.getToken(false).then(() => { settled = true; }, () => { settled = true; });
+      setTimeout(() => {
+        if(settled) return;
+        try{ sessionStorage.setItem('fwd_skip_appcheck', '1'); }catch(e){ return; }
+        location.reload();
+      }, 8000);
+    }catch(e){ console.error('App Check could not start:', e); }
+  }
   const FIREBASE_READY = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey.indexOf('PASTE_') !== 0);
   let db = null;
   if(FIREBASE_READY){
     firebase.initializeApp(FIREBASE_CONFIG, 'forwarding');
+    startAppCheck(firebase.app('forwarding'));
     db = firebase.app('forwarding').firestore();
   }
 
@@ -1609,7 +1645,7 @@
   // Shown beside your name in the header. The team ships several builds a
   // day, so there has to be a way to tell what a given phone is actually
   // running without guessing — tap it and it checks for a newer one.
-  const APP_BUILD = '2026-10-25f';
+  const APP_BUILD = '2026-11-21a';
   // Registration itself lives in its own script in the head, so it survives
   // the app script failing to start.
   const swState = () => window.__sw || {};
