@@ -1313,6 +1313,20 @@
     }
     return v;
   }
+  // Surveys are never deleted, only added to and updated, so anything on the
+  // server this device has not seen is kept. Where both sides have the same
+  // report, this device's changes win, and anything only the server has (a
+  // payment recorded on another phone, say) is kept.
+  function mergeSurveys(theirs, mine){
+    const t = Array.isArray(theirs) ? theirs : [];
+    const m = Array.isArray(mine) ? mine : [];
+    if(!t.length) return m;
+    const byId = new Map(t.filter(r => r && r.id).map(r => [r.id, r]));
+    const out = m.map(r => (r && r.id && byId.has(r.id)) ? Object.assign({}, byId.get(r.id), r) : r);
+    const have = new Set(m.filter(r => r && r.id).map(r => r.id));
+    t.forEach(r => { if(r && r.id && !have.has(r.id)) out.push(r); });
+    return out.sort((a, b) => String(a.raisedAt || a.date || '').localeCompare(String(b.raisedAt || b.date || '')));
+  }
   async function saveShipment(s){
     // Stamped on every save so a shortfall can still be found after the
     // shipment closes — the board only ever queries open shipments, so an
@@ -1367,6 +1381,12 @@
           ? mine.concat(missed).sort((a, b) => String(a.at).localeCompare(String(b.at)))
           : mine;
         s.activity = merged;
+        // Survey reports are kept the same way. A device holding a copy
+        // loaded before someone else raised a survey used to write the
+        // shipment back without it: the survey stayed in the Surveys list and
+        // the Charges tab, but the shipment said "No survey raised" and its
+        // charge could not be marked paid.
+        if(doc.exists) s.surveys = mergeSurveys(doc.data().surveys, s.surveys);
         tx.set(ref, stripUndefined(s));
       });
     }catch(e){
@@ -1645,7 +1665,7 @@
   // Shown beside your name in the header. The team ships several builds a
   // day, so there has to be a way to tell what a given phone is actually
   // running without guessing — tap it and it checks for a newer one.
-  const APP_BUILD = '2026-11-21a';
+  const APP_BUILD = '2026-11-23a';
   // Registration itself lives in its own script in the head, so it survives
   // the app script failing to start.
   const swState = () => window.__sw || {};
@@ -7730,6 +7750,7 @@
       const btn = document.getElementById('ch-pay');
       if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
       let done = 0;
+      const skipped = [];
       const now = new Date().toISOString();
       // Mirrored only once the shipment itself has saved, so the index never
       // shows a charge as paid that the shipment does not.
@@ -7771,8 +7792,18 @@
               // The report on the shipment is the one that gets written —
               // the index copy is only a mirror of it, and may be the object
               // this row was built from.
-              const rec = (s.surveys || []).find(r => r.id === i.rec.id);
-              if(!rec) continue;
+              let rec = (s.surveys || []).find(r => r.id === i.rec.id);
+              if(!rec && i.rec && i.rec.id){
+                // The shipment lost this report (an older copy saved over it)
+                // while the Surveys list still has it. Put it back from that
+                // copy, then mark it paid.
+                const { shipId, awb, type, customer, ...back } = i.rec;
+                rec = back;
+                s.surveys = (s.surveys || []).concat([rec]);
+                if(typeof refreshSurveyFlags === 'function') refreshSurveyFlags(s);
+                logActivity(s, `Survey report restored to the shipment from the Surveys list`, 'survey', null, rec.hawb || '');
+              }
+              if(!rec){ skipped.push(i); continue; }
               // Frozen on the report itself, so the survey's bill is
               // traceable whatever happens to the handling charge later.
               const amt = i.amount;
@@ -7828,6 +7859,10 @@
         invalidateEditedCharges();
         STATE.chargesPicked = {};
         paintShell();
+        if(skipped.length){
+          alert(`${skipped.length} line${skipped.length===1?'':'s'} could not be marked paid — `
+            + `the record was not found on the shipment. Nothing was changed for ${skipped.length===1?'it':'them'}.`);
+        }
       }catch(e){
         if(btn){ btn.disabled = false; btn.textContent = 'Mark paid'; }
         alert(`Saved ${done} of ${picked.length}, then failed: ${e.message}`);
