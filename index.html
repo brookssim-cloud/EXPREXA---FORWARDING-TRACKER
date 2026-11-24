@@ -1047,6 +1047,13 @@
   // own payable line with its own payment. What is left over — a fee charged
   // once on the master, however the cargo is split — stays on the shipment.
   function hawbChargePaid(s, no){ return (s.hawbCharges || {})[no] || null; }
+  // Any typed-in invoice figure on this AWB, whole or per house bill, paid
+  // or not — what keeps it on the Edited list after the shipment closes.
+  function chargeWasEdited(s){
+    return !!(s.chargeOverride || (s.chargePaid && s.chargePaid.override)
+      || Object.keys(s.hawbOverrides || {}).length
+      || Object.values(s.hawbCharges || {}).some(p => p && p.override));
+  }
   // What has already been handed over against individual house bills.
   function paidHawbTotal(s){
     return Object.values(s.hawbCharges || {})
@@ -1084,7 +1091,23 @@
   }
   // What one house bill owes: the terminal's scale on its own weight, plus
   // one unit of every per-HAWB fee.
+  // A house bill's own invoice figure, typed in under "Amount differs" on
+  // its line. It replaces the rate calculation for that house bill only —
+  // the others on the same AWB keep theirs — and is used up when it is paid.
+  function hawbOverride(s, no){ return (s && s.hawbOverrides || {})[no] || null; }
   function chargeForHawb(s, h){
+    const calc = chargeForHawbRates(s, h);
+    const ov = h && hawbOverride(s, h.no);
+    if(!ov) return calc;
+    const amt = Number(ov.amount) || 0;
+    const term = terminalObjForAwb(s.awb, STATE.terminals);
+    return { ok:true, paid:false, override:true, terminalName: term ? term.name : (calc.terminalName || ''),
+      type: s.type === 'export' ? 'export' : 'import', kg: Number(h.kg) || 0,
+      lines:[{ label:'Amount from the invoice', amount: amt }], total: amt, warn:'',
+      note: ov.note ? ov.note : `${kgText(Number(h.kg)||0)} kg`,
+      calculated: calc.ok ? calc.total : null, photoId: ov.photoId || null, by: ov.by || '' };
+  }
+  function chargeForHawbRates(s, h){
     const term = terminalObjForAwb(s.awb, STATE.terminals);
     const type = s.type === 'export' ? 'export' : 'import';
     const termName = term ? term.name : '';
@@ -1351,7 +1374,7 @@
     // A typed-in amount has to stay findable after it is paid and the
     // shipment closes, which is exactly when it falls off both the board and
     // the open-charges query — so it carries its own flag.
-    s.chargeEdited = !!(s.chargeOverride || (s.chargePaid && s.chargePaid.override));
+    s.chargeEdited = chargeWasEdited(s);
 
     // The activity feed is merged rather than overwritten.
     //
@@ -1526,7 +1549,7 @@
       if(!s || !s.id) return;
       const open = chargesDue(s) && !chargeSettled(s);
       const duty = dutyDue(s);
-      const edited = !!(s.chargeOverride || (s.chargePaid && s.chargePaid.override));
+      const edited = chargeWasEdited(s);
       if(s.chargeOpen === open && s.dutyOpen === duty && s.chargeEdited === edited) return;
       s.chargeOpen = open;
       s.dutyOpen = duty;
@@ -1665,7 +1688,7 @@
   // Shown beside your name in the header. The team ships several builds a
   // day, so there has to be a way to tell what a given phone is actually
   // running without guessing — tap it and it checks for a newer one.
-  const APP_BUILD = '2026-11-23a';
+  const APP_BUILD = '2026-11-24a';
   // Registration itself lives in its own script in the head, so it survives
   // the app script failing to start.
   const swState = () => window.__sw || {};
@@ -5775,6 +5798,8 @@
     });
     (s.xtracks || []).forEach(t => { add(t.photoId); (t.photoIds || []).forEach(add); });
     if(s.chargeOverride) add(s.chargeOverride.photoId);
+    Object.values(s.hawbOverrides || {}).forEach(o => o && add(o.photoId));
+    Object.values(s.hawbCharges || {}).forEach(p => p && add(p.photoId));
     return [...ids];
   }
   // Deletes the shipment and everything that points at it, in batches so a
@@ -7008,6 +7033,27 @@
       seen.add(s.id);
       const o = s.chargeOverride;
       const paid = s.chargePaid && s.chargePaid.override ? s.chargePaid : null;
+      // House bills with their own typed figure, waiting or paid.
+      const hTerm = chargeTermOf(s);
+      Object.entries(s.hawbOverrides || {}).forEach(([no, ov]) => {
+        if(!ov) return;
+        const h = hawbList(s).find(x => x.no === no) || { no, kg: 0 };
+        const calc = chargeForHawbRates(s, h);
+        out.push({ id: 'ed:' + s.id + '::' + no, s, shipId: s.id, awb: no, mawb: s.awb, type: s.type,
+          customer: h.customer || s.customer || '', terminalName: hTerm, created: dayOf(s.createdAt),
+          typed: Number(ov.amount) || 0, calculated: calc.ok ? calc.total : null,
+          by: ov.by || '', at: ov.at || '', note: ov.note || '', photoId: ov.photoId || null,
+          paid: false, paidOn: '' });
+      });
+      Object.entries(s.hawbCharges || {}).forEach(([no, p]) => {
+        if(!p || !p.override) return;
+        const h = hawbList(s).find(x => x.no === no) || { no };
+        out.push({ id: 'ed:' + s.id + '::' + no, s, shipId: s.id, awb: no, mawb: s.awb, type: s.type,
+          customer: h.customer || s.customer || '', terminalName: hTerm, created: dayOf(s.createdAt),
+          typed: Number(p.total) || 0, calculated: p.calculated != null ? p.calculated : null,
+          by: p.editedBy || p.by || '', at: p.editedAt || p.at || '', note: p.note || '', photoId: p.photoId || null,
+          paid: true, paidOn: p.paidOn || dayOf(p.at) });
+      });
       if(!o && !paid) return;
       const term = chargeTermOf(s);
       const type = s.type === 'export' ? 'export' : 'import';
@@ -7124,6 +7170,94 @@
         s.chargeOverride = { amount: amt, note, photoId, by: ME.name, at: new Date().toISOString() };
         logActivity(s, `Terminal charge set to ${money(amt)} from the invoice` + (note ? ` — ${note}` : ''), 'edit', photoId);
         await saveShipment(s);
+        onDone();
+      }catch(e){
+        this.disabled = false; this.textContent = 'Save the actual amount';
+        msg.style.color='var(--red)'; msg.textContent = 'Could not save: ' + e.message;
+      }
+    };
+  }
+
+  // The same screen for one house bill. Its figure is that house bill's
+  // invoice only, so it never touches the other house bills on the AWB.
+  function renderHawbChargeAdjust(s, h, onDone, onCancel){
+    const c = document.getElementById('content') || document.getElementById('app');
+    const calc = chargeForHawbRates(s, h);
+    const cur = hawbOverride(s, h.no);
+    let file = null;
+    c.innerHTML = `
+      <div class="back" id="ca-bk">&larr; Cancel</div>
+      <div class="head" style="padding-bottom:16px;">
+        <div class="awb-lg" style="font-family:'Space Grotesk',sans-serif;font-size:18px;">Amount differs</div>
+        <div class="meta">${escapeHtml(h.no)} &middot; on ${escapeHtml(s.awb)}${(h.customer||s.customer)?` &middot; ${escapeHtml(h.customer||s.customer)}`:''}</div>
+      </div>
+      <div class="card">
+        <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:12px;">
+          Worked out from the rates as <b style="color:var(--text);">${calc.ok ? money(calc.total) : '—'}</b>.
+          Enter what the terminal actually charged for <b style="color:var(--text);">this house bill only</b>
+          and attach the invoice. The other house bills on ${escapeHtml(s.awb)} are not changed.
+        </div>
+        <div class="field" style="padding:0;"><label>Actual amount</label>
+          <input type="number" min="0" step="0.01" id="ca-amt"
+            value="${cur ? escapeHtml(String(cur.amount)) : ''}" placeholder="0.00"></div>
+        <div class="field" style="padding:0;"><label>Note <span style="font-weight:400;color:var(--muted);text-transform:none;">— optional</span></label>
+          <input type="text" id="ca-note" maxlength="60" placeholder="e.g. storage added"
+            value="${cur && cur.note ? escapeHtml(cur.note) : ''}"></div>
+        <div class="sect" style="margin:6px 0;">PHOTO OF THE INVOICE</div>
+        <div id="ca-preview" style="margin-bottom:10px;">
+          <div style="font-size:12.5px;color:var(--muted);">${cur ? 'Keeping the photo already attached — take a new one to replace it.' : 'No photo taken yet — one is required.'}</div>
+        </div>
+        <input type="file" accept="image/*" capture="environment" id="ca-file" style="display:none;">
+        <input type="file" accept="image/*" id="ca-upload" style="display:none;">
+        <div style="display:flex;gap:8px;">
+          <button class="lot-act ghost" id="ca-take" style="flex:1;">Take photo</button>
+          <button class="lot-act ghost" id="ca-pick" style="flex:1;">Upload photo</button>
+        </div>
+        <button class="advance needs-input" id="ca-save" style="margin-top:14px;">
+          <small>Replaces the calculated figure for ${escapeHtml(h.no)}</small>Save the actual amount</button>
+        ${cur ? `<button class="lot-act ghost" id="ca-undo" style="width:100%;margin-top:10px;">Go back to the calculated figure</button>` : ''}
+        <div id="ca-msg" style="margin-top:9px;font-size:12.5px;text-align:center;"></div>
+      </div>
+      <div style="height:20px;"></div>`;
+    const msg = document.getElementById('ca-msg');
+    function picked(input){
+      file = input.files[0] || null;
+      if(file) document.getElementById('ca-preview').innerHTML =
+        `<img src="${URL.createObjectURL(file)}" style="max-width:100%;max-height:220px;border-radius:10px;">`;
+    }
+    document.getElementById('ca-take').onclick = () => document.getElementById('ca-file').click();
+    document.getElementById('ca-pick').onclick = () => document.getElementById('ca-upload').click();
+    document.getElementById('ca-file').onchange = function(){ picked(this); };
+    document.getElementById('ca-upload').onchange = function(){ picked(this); };
+    document.getElementById('ca-bk').onclick = () => onCancel();
+    const undo = document.getElementById('ca-undo');
+    if(undo) undo.onclick = async function(){
+      if(!confirm(`Remove the typed amount for ${h.no} and go back to ${calc.ok ? money(calc.total) : 'the rates'}?`)) return;
+      this.disabled = true;
+      try{
+        s.hawbOverrides = { ...(s.hawbOverrides || {}) };
+        delete s.hawbOverrides[h.no];
+        logActivity(s, `${h.no} — typed terminal charge removed, back to the rates`, 'edit', null, h.no);
+        await saveShipment(s);
+        invalidateEditedCharges();
+        onDone();
+      }catch(e){ this.disabled = false; msg.style.color='var(--red)'; msg.textContent = 'Could not save: ' + e.message; }
+    };
+    document.getElementById('ca-save').onclick = async function(){
+      const raw = document.getElementById('ca-amt').value.trim();
+      const amt = raw === '' ? NaN : Number(raw);
+      if(isNaN(amt) || amt < 0){ msg.style.color='var(--red)'; msg.textContent='Enter the amount the terminal charged.'; return; }
+      if(!file && !cur){ msg.style.color='var(--red)'; msg.textContent='Attach a photo of the invoice.'; return; }
+      this.disabled = true; this.textContent = 'Saving…';
+      try{
+        let photoId = cur ? cur.photoId : null;
+        if(file) photoId = await savePhoto(await resizeImageFile(file, PHOTO_DOC.max, PHOTO_DOC.q));
+        const note = document.getElementById('ca-note').value.trim();
+        s.hawbOverrides = { ...(s.hawbOverrides || {}) };
+        s.hawbOverrides[h.no] = { amount: amt, note, photoId, by: ME.name, at: new Date().toISOString() };
+        logActivity(s, `${h.no} — terminal charge set to ${money(amt)} from the invoice` + (note ? ` — ${note}` : ''), 'edit', photoId, h.no);
+        await saveShipment(s);
+        invalidateEditedCharges();
         onDone();
       }catch(e){
         this.disabled = false; this.textContent = 'Save the actual amount';
@@ -7556,6 +7690,10 @@
             ${escapeHtml(ch.why)}${IS_MOD?' — set them under Settings.':''}</div>` : ''}
           ${ch.warn ? `<div style="font-size:11.5px;color:var(--red);margin-top:5px;line-height:1.6;">
             ${escapeHtml(ch.warn)}</div>` : ''}
+          ${i.kind === 'hawb' && CAN_EDIT && s ? `<div style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;">
+            <span class="link-act" data-adjust-hawb="${escapeHtml(s.id)}" data-hawb-no="${escapeHtml(i.hawb.no)}">${hawbOverride(s, i.hawb.no)?'Change the amount':'Amount differs'}</span>
+            ${ch.override && ch.photoId ? `<span class="link-act" data-viewphoto="${escapeHtml(ch.photoId)}">Invoice photo</span>` : ''}
+          </div>` : ''}
           ${i.kind !== 'duty' && i.kind !== 'hawb' && CAN_EDIT && s ? `<div style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;">
             <span class="link-act" data-adjust="${escapeHtml(s.id)}">${s.chargeOverride?'Change the amount':'Amount differs'}</span>
             ${ch.needsHawbKg ? `<span class="link-act" data-hawbkg="${escapeHtml(s.id)}"
@@ -7642,6 +7780,15 @@
       });
       host.querySelectorAll('[data-open]').forEach(el => el.onclick = () => {
         if(el.dataset.open) renderDetail(el.dataset.open); });
+      host.querySelectorAll('[data-adjust-hawb]').forEach(el=>{
+        el.onclick = (e) => {
+          e.stopPropagation();
+          const sh = STATE.shipments.find(x => x.id === el.dataset.adjustHawb)
+            || (_openCharges || []).find(x => x.id === el.dataset.adjustHawb);
+          const h = sh && hawbList(sh).find(x => x.no === el.dataset.hawbNo);
+          if(sh && h) renderHawbChargeAdjust(sh, h, () => paintShell(), () => paintShell());
+        };
+      });
       host.querySelectorAll('[data-adjust]').forEach(el=>{
         el.onclick = (e) => {
           e.stopPropagation();
@@ -7826,6 +7973,15 @@
               s.hawbCharges[i.hawb.no] = { total: ch.total, lines: ch.lines,
                 terminalName: ch.terminalName, kg: ch.kg, by: ME.name, at: now,
                 ref: ref.trim(), paidOn: todayStr() };
+              if(ch.override){
+                // The invoice figure has been used, so it does not carry over —
+                // but what it was, and the photo behind it, stay on the payment.
+                const ov = hawbOverride(s, i.hawb.no) || {};
+                Object.assign(s.hawbCharges[i.hawb.no], { override: true, calculated: ch.calculated,
+                  note: ov.note || '', photoId: ov.photoId || null, editedBy: ov.by || '', editedAt: ov.at || '' });
+                s.hawbOverrides = { ...(s.hawbOverrides || {}) };
+                delete s.hawbOverrides[i.hawb.no];
+              }
               logActivity(s, `${i.hawb.no} — terminal charges paid ${money(ch.total)}`
                 + (ch.terminalName ? ` to ${ch.terminalName}` : '')
                 + (ref.trim() ? ` · ref ${ref.trim()}` : ''), 'payment', null, i.hawb.no);
