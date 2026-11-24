@@ -1697,7 +1697,7 @@
   // Shown beside your name in the header. The team ships several builds a
   // day, so there has to be a way to tell what a given phone is actually
   // running without guessing — tap it and it checks for a newer one.
-  const APP_BUILD = '2026-11-24c';
+  const APP_BUILD = '2026-11-24d';
   // Registration itself lives in its own script in the head, so it survives
   // the app script failing to start.
   const swState = () => window.__sw || {};
@@ -2404,9 +2404,9 @@
       // Every lot closed, but one was closed with pieces still not handed
       // over — that is unfinished work, not a delivery, and it has its own
       // heading so it is not mistaken for done.
-      const short = shortLabelFor(lots);
-      if(short) return short;
-      return arrivalBalance(s) > 0 ? 'Awaiting balance' : 'Delivered';
+      // Part of the MAWB still to land comes first: that is what keeps it open.
+      if(arrivalBalance(s) > 0 && !s.balanceWrittenOff) return 'Awaiting balance';
+      return shortLabelFor(lots) || 'Delivered';
     }
     let worstH = -1, worstLabel = null;
     openLots.forEach(l=>{
@@ -2505,9 +2505,8 @@
     const open = ls.filter(l => !l.closed);
     // Every lot of this bill finished: done, unless part of it never came.
     if(open.length === 0){
-      const short = shortLabelFor(ls);
-      if(short) return short;
-      return (hawbBalance(s, h) || 0) > 0 ? 'Awaiting balance' : 'Delivered';
+      if((hawbBalance(s, h) || 0) > 0) return 'Awaiting balance';
+      return shortLabelFor(ls) || 'Delivered';
     }
     // Read the same way the shipment is: the lot that has sat longest speaks,
     // and one still in the air only speaks if none of them is in hand.
@@ -2569,7 +2568,10 @@
   // same question here so the two screens can never disagree about what is
   // done. Nothing is hidden: a finished bill stays visible under the work
   // that is left, which is also where it belongs on a screen read top-down.
-  const FINISHED_STATUS = l => l === 'Delivered' || l === 'All lots delivered';
+  // A house bill closed short is finished as far as the board goes — the
+  // pieces it still owes are chased from Outstanding, not from here.
+  const FINISHED_STATUS = l => l === 'Delivered' || l === 'All lots delivered'
+    || l === 'Closed short' || l === 'Not received';
 
   function boardListingHtml(list){
     // One row per consignment: a direct shipment is one row, a consolidation
@@ -2655,11 +2657,38 @@
     `).join('');
   }
 
+  // An import whose lots are all closed and whose MAWB has nothing left to
+  // land is complete — closed short or not, since a shortfall is chased from
+  // Outstanding. Some were left open: closed while the MAWB still showed a
+  // balance that was later corrected under Edit details, which never asked
+  // the question again. They are completed here, dated the day the last lot
+  // closed, so the board only carries work that is still moving.
+  function shouldBeClosed(s){
+    if(!s || s.closed || s.type !== 'import') return false;
+    const lots = s.lots || [];
+    if(!lots.length || !lots.every(l => l.closed)) return false;
+    return arrivalBalance(s) === 0 || !!s.balanceWrittenOff;
+  }
+  const _healing = new Set();
+  function healUnclosed(){
+    (STATE.shipments || []).forEach(s => {
+      if(!shouldBeClosed(s) || _healing.has(s.id)) return;
+      if(!CAN_EDIT) return;   // a view-only signin only hides it, below
+      _healing.add(s.id);
+      const last = (s.lots || []).map(l => l.closedAt || l.stageAt).filter(Boolean).sort().pop();
+      s.closed = true;
+      s.closedDate = last ? dayOf(last) : todayStr();
+      logActivity(s, 'Completed — every lot closed and nothing left to arrive on the MAWB');
+      saveShipment(s).catch(e => { console.error('Could not complete', s.awb, e); s.closed = false; _healing.delete(s.id); });
+    });
+  }
+
   function paintBoard(c, counts){
+    healUnclosed();
     // A shipment closes during a live session, not just between page loads —
     // the initial query filtered these out, but nothing since then had, so a
     // shipment closed just now kept sitting on the board until a full reload.
-    let list = STATE.shipments.filter(s=>!s.closed);
+    let list = STATE.shipments.filter(s=>!s.closed && !shouldBeClosed(s));
     if(STATE.filter === 'export') list = list.filter(s=>s.type==='export');
     else if(STATE.filter === 'import') list = list.filter(s=>s.type==='import');
     // Same rule as the "closing" counter above the filters, so the chip and
