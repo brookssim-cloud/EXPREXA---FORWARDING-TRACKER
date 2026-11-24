@@ -1476,8 +1476,17 @@
   // number would always put the shorter sequence ahead. Used wherever work
   // is listed furthest-along first, so what is still in the air falls to the
   // bottom where it needs nothing today.
+  // The heading for closed lots that still owe pieces: "Not received" when
+  // the consignee never took them, "Closed short" otherwise. Null when every
+  // closed lot was handed over in full.
+  function shortLabelFor(lots){
+    const owing = (lots || []).filter(l => l && l.closed && l.hasArrived && lotShortfall(l) > 0);
+    if(!owing.length) return null;
+    return owing.every(l => l.notReceived) ? 'Not received' : 'Closed short';
+  }
   function statusProgress(label, type, k1){
     const s = String(label || '');
+    if(s === 'Closed short' || s === 'Not received') return 0.95;
     if(s === 'Not arrived') return -1;
     // The flight came and brought nothing: further along than still in the
     // air, but behind anything that has cargo to work on.
@@ -1688,7 +1697,7 @@
   // Shown beside your name in the header. The team ships several builds a
   // day, so there has to be a way to tell what a given phone is actually
   // running without guessing — tap it and it checks for a newer one.
-  const APP_BUILD = '2026-11-24a';
+  const APP_BUILD = '2026-11-24c';
   // Registration itself lives in its own script in the head, so it survives
   // the app script failing to start.
   const swState = () => window.__sw || {};
@@ -2391,7 +2400,14 @@
     }
     const lots = s.lots || [];
     const openLots = lots.filter(l=>!l.closed);
-    if(openLots.length === 0) return arrivalBalance(s) > 0 ? 'Awaiting balance' : 'Delivered';
+    if(openLots.length === 0){
+      // Every lot closed, but one was closed with pieces still not handed
+      // over — that is unfinished work, not a delivery, and it has its own
+      // heading so it is not mistaken for done.
+      const short = shortLabelFor(lots);
+      if(short) return short;
+      return arrivalBalance(s) > 0 ? 'Awaiting balance' : 'Delivered';
+    }
     let worstH = -1, worstLabel = null;
     openLots.forEach(l=>{
       if(!l.hasArrived){ if(worstLabel===null) worstLabel = 'Not arrived'; return; }
@@ -2488,7 +2504,11 @@
     if(!ls.length) return hasUnmappedLot(s) ? shipmentStatus(s) : 'Not arrived';
     const open = ls.filter(l => !l.closed);
     // Every lot of this bill finished: done, unless part of it never came.
-    if(open.length === 0) return (hawbBalance(s, h) || 0) > 0 ? 'Awaiting balance' : 'Delivered';
+    if(open.length === 0){
+      const short = shortLabelFor(ls);
+      if(short) return short;
+      return (hawbBalance(s, h) || 0) > 0 ? 'Awaiting balance' : 'Delivered';
+    }
     // Read the same way the shipment is: the lot that has sat longest speaks,
     // and one still in the air only speaks if none of them is in hand.
     let worstH = -1, worstLabel = null;
@@ -4548,7 +4568,7 @@
       <div class="back" id="bk">&larr; ${TAB_LABEL[_detailFrom] || 'Board'}</div>
       <div class="head">
         <div class="awb-lg">${escapeHtml(s.awb)}</div>
-        <div class="meta">Import from ${escapeHtml(s.from||'—')}<br>${escapeHtml(s.customer||'')}</div>
+        <div class="meta">Import from ${escapeHtml(s.from||'—')} to ${escapeHtml(s.to||'—')}<br>${escapeHtml(s.customer||'')}</div>
         ${cargoOf(s) !== 'general' ? `<div style="margin-top:7px;"><span class="lot-tag"
           style="background:${cargoOf(s) === 'dg' ? 'rgba(214,69,69,.14);color:var(--red)'
             : 'rgba(31,157,107,.14);color:var(--green)'};"
